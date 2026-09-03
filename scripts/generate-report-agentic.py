@@ -110,12 +110,27 @@ def load_amended_entries(run_dir: Path) -> list[dict]:
                 continue
             turn = turns[0]
             duration = None
-            agentic_run_results = turn.get("openshift_agentic_run_results") or {}
-            analysis_results = agentic_run_results.get("analysis", [])
-            if analysis_results:
-                conditions = analysis_results[0].get("conditions", [])
-                started = next((c["lastTransitionTime"] for c in conditions if c["type"] == "Started"), None)
-                completed = next((c["lastTransitionTime"] for c in conditions if c["type"] == "Completed"), None)
+            run_results = turn.get("openshift_agentic_run_results")
+            if not isinstance(run_results, dict):
+                run_results = None
+            analysis_results = run_results.get("analysis", []) if run_results else []
+            if isinstance(analysis_results, list) and analysis_results and isinstance(analysis_results[0], dict):
+                # Normalize conditions to empty list if null or not a list
+                conditions = analysis_results[0].get("conditions")
+                if not isinstance(conditions, list):
+                    conditions = []
+
+                # Validate each condition is a dict with required fields before accessing
+                started = next(
+                    (c.get("lastTransitionTime") for c in conditions
+                     if isinstance(c, dict) and c.get("type") == "Started"),
+                    None
+                )
+                completed = next(
+                    (c.get("lastTransitionTime") for c in conditions
+                     if isinstance(c, dict) and c.get("type") == "Completed"),
+                    None
+                )
                 if started and completed:
                     s = datetime.fromisoformat(started.replace("Z", "+00:00"))
                     e = datetime.fromisoformat(completed.replace("Z", "+00:00"))
@@ -123,13 +138,29 @@ def load_amended_entries(run_dir: Path) -> list[dict]:
 
             agent_tok = (turn.get("api_input_tokens") or 0) + (turn.get("api_output_tokens") or 0)
 
+            # Normalize agentic_run_status to dict (handle non-dict truthy values like lists)
+            run_status = turn.get("openshift_agentic_run_status")
+            if not isinstance(run_status, dict):
+                run_status = {}
+
+            # Normalize conditions to list of dicts (prevents phase_status iteration errors)
+            if "conditions" in run_status:
+                conditions_raw = run_status["conditions"]
+                if not isinstance(conditions_raw, list):
+                    run_status["conditions"] = []
+                else:
+                    # Filter to only valid dict entries
+                    run_status["conditions"] = [
+                        c for c in conditions_raw if isinstance(c, dict)
+                    ]
+
             entries.append({
                 "conversation_group_id": cid,
                 "description": entry.get("description", ""),
                 "query": turn.get("query", ""),
                 "response": turn.get("response", ""),
                 "tags": tags,
-                "agentic_run_status": turn.get("openshift_agentic_run_status") or {},
+                "agentic_run_status": run_status,
                 "analysis_duration": duration,
                 "agent_tokens": agent_tok,
             })

@@ -439,6 +439,179 @@ class TestGenerateReport:
         assert "# Evaluation Summary" in report
         assert "s1" in report
 
+    def test_handles_non_dict_agentic_run_status(self, tmp_path):
+        """Regression test: agentic_run_status as list should be normalized to {}."""
+        run_dir = tmp_path / "gpt-5.4" / "run_1"
+        _write_run(
+            run_dir,
+            results=[_make_result("remediation-scenario")],
+            amended_entries=[{
+                "conversation_id": "remediation-scenario",
+                "tags": ["remediation"],
+            }],
+        )
+        # Inject a list instead of dict for openshift_agentic_run_status
+        amended_path = next(run_dir.glob("*amended*.yaml"))
+        amended = yaml.safe_load(amended_path.read_text())
+        amended[0]["turns"][0]["openshift_agentic_run_status"] = ["invalid", "list", "value"]
+        amended_path.write_text(yaml.dump(amended))
+
+        # Should not crash with AttributeError when phase_status tries .get()
+        report = mod.generate_report(tmp_path)
+
+        assert "# Evaluation Summary" in report
+        assert "remediation-scenario" in report
+        # Phase breakdown should show Failed (no valid conditions)
+        assert "[A ❌ 0/1<br>E ❌ 0/1<br>V ❌ 0/1](#gpt-5.4--remediation-scenario)" in report
+
+    def test_handles_null_conditions_in_analysis(self, tmp_path):
+        """Regression test: conditions field as null should be normalized to []."""
+        run_dir = tmp_path / "gpt-5.4" / "run_1"
+        _write_run(
+            run_dir,
+            results=[_make_result("s1")],
+            amended_entries=[{
+                "conversation_id": "s1",
+                "agentic_run_results": {"analysis": [{"conditions": None}]},
+            }],
+        )
+        amended_path = next(run_dir.glob("*amended*.yaml"))
+        amended = yaml.safe_load(amended_path.read_text())
+        amended[0]["turns"][0]["openshift_agentic_run_results"] = {"analysis": [{"conditions": None}]}
+        amended_path.write_text(yaml.dump(amended))
+
+        # Should not crash when conditions is null
+        report = mod.generate_report(tmp_path)
+        assert "# Evaluation Summary" in report
+        assert "s1" in report
+
+    def test_handles_conditions_with_none_entries(self, tmp_path):
+        """Regression test: conditions list containing None should skip invalid entries."""
+        run_dir = tmp_path / "gpt-5.4" / "run_1"
+        _write_run(
+            run_dir,
+            results=[_make_result("s1")],
+            amended_entries=[{
+                "conversation_id": "s1",
+                "agentic_run_results": {
+                    "analysis": [{
+                        "conditions": [
+                            None,
+                            {"type": "Started", "lastTransitionTime": "2026-01-01T10:00:00Z"},
+                            None,
+                            {"type": "Completed", "lastTransitionTime": "2026-01-01T10:05:00Z"},
+                        ]
+                    }]
+                },
+            }],
+        )
+        amended_path = next(run_dir.glob("*amended*.yaml"))
+        amended = yaml.safe_load(amended_path.read_text())
+        amended[0]["turns"][0]["openshift_agentic_run_results"] = {
+            "analysis": [{
+                "conditions": [
+                    None,
+                    {"type": "Started", "lastTransitionTime": "2026-01-01T10:00:00Z"},
+                    None,
+                    {"type": "Completed", "lastTransitionTime": "2026-01-01T10:05:00Z"},
+                ]
+            }]
+        }
+        amended_path.write_text(yaml.dump(amended))
+
+        # Should skip None entries and process valid conditions
+        report = mod.generate_report(tmp_path)
+        assert "# Evaluation Summary" in report
+        assert "s1" in report
+
+    def test_handles_conditions_missing_type_field(self, tmp_path):
+        """Regression test: condition entries missing 'type' field should be skipped."""
+        run_dir = tmp_path / "gpt-5.4" / "run_1"
+        _write_run(
+            run_dir,
+            results=[_make_result("s1")],
+            amended_entries=[{
+                "conversation_id": "s1",
+                "agentic_run_results": {
+                    "analysis": [{
+                        "conditions": [
+                            {"status": "True"},  # Missing 'type' field
+                            {"type": "Started", "lastTransitionTime": "2026-01-01T10:00:00Z"},
+                            {"lastTransitionTime": "2026-01-01T10:05:00Z"},  # Missing 'type' field
+                        ]
+                    }]
+                },
+            }],
+        )
+        amended_path = next(run_dir.glob("*amended*.yaml"))
+        amended = yaml.safe_load(amended_path.read_text())
+        amended[0]["turns"][0]["openshift_agentic_run_results"] = {
+            "analysis": [{
+                "conditions": [
+                    {"status": "True"},  # Missing 'type' field
+                    {"type": "Started", "lastTransitionTime": "2026-01-01T10:00:00Z"},
+                    {"lastTransitionTime": "2026-01-01T10:05:00Z"},  # Missing 'type' field
+                ]
+            }]
+        }
+        amended_path.write_text(yaml.dump(amended))
+
+        # Should skip entries missing 'type' and process valid ones
+        report = mod.generate_report(tmp_path)
+        assert "# Evaluation Summary" in report
+        assert "s1" in report
+
+    def test_normalizes_null_conditions_in_stored_status(self, tmp_path):
+        """Regression test: null conditions in agentic_run_status should be normalized to [] before storage."""
+        run_dir = tmp_path / "gpt-5.4" / "run_1"
+        _write_run(
+            run_dir,
+            results=[_make_result("remediation-scenario")],
+            amended_entries=[{
+                "conversation_id": "remediation-scenario",
+                "tags": ["remediation"],
+            }],
+        )
+        amended_path = next(run_dir.glob("*amended*.yaml"))
+        amended = yaml.safe_load(amended_path.read_text())
+        amended[0]["turns"][0]["openshift_agentic_run_status"] = {"conditions": None}
+        amended_path.write_text(yaml.dump(amended))
+
+        # Should not crash in phase_status when iterating conditions
+        report = mod.generate_report(tmp_path)
+        assert "# Evaluation Summary" in report
+        assert "[A ❌ 0/1<br>E ❌ 0/1<br>V ❌ 0/1](#gpt-5.4--remediation-scenario)" in report
+
+    def test_normalizes_non_dict_entries_in_stored_conditions(self, tmp_path):
+        """Regression test: non-dict entries in conditions list should be filtered before storage."""
+        run_dir = tmp_path / "gpt-5.4" / "run_1"
+        _write_run(
+            run_dir,
+            results=[_make_result("remediation-scenario")],
+            amended_entries=[{
+                "conversation_id": "remediation-scenario",
+                "tags": ["remediation"],
+            }],
+        )
+        amended_path = next(run_dir.glob("*amended*.yaml"))
+        amended = yaml.safe_load(amended_path.read_text())
+        amended[0]["turns"][0]["openshift_agentic_run_status"] = {
+            "conditions": [
+                None,
+                "invalid-string",
+                {"type": "Analyzed", "status": "True"},
+                123,
+                {"type": "Executed", "status": "False"},
+            ]
+        }
+        amended_path.write_text(yaml.dump(amended))
+
+        # Should filter out non-dict entries and process only valid dicts
+        report = mod.generate_report(tmp_path)
+        assert "# Evaluation Summary" in report
+        # Should process the two valid conditions
+        assert "[A ✅ 1/1<br>E ❌ 0/1<br>V ❌ 0/1](#gpt-5.4--remediation-scenario)" in report
+
     def test_no_rankings_section(self, tmp_path):
         _write_run(
             tmp_path / "gpt-5.4" / "run_1",
