@@ -553,6 +553,19 @@ class TestGenerateReport:
         assert "| Avg tokens | 100 |" in report
         assert "| **Average** | 100 |" in report
 
+    def test_tokens_compact_formatting(self, tmp_path):
+        _write_run(
+            tmp_path / "agent" / "run_1",
+            results=[_make_result("s1")],
+            amended_entries=[{
+                "conversation_id": "s1",
+                "api_input_tokens": 50000,
+                "api_output_tokens": 1000,
+            }],
+        )
+        report = mod.generate_report(tmp_path)
+        assert "| Avg tokens | 51K |" in report
+
 
 class TestPrintCorrectnessTable:
     def test_basic_output(self, tmp_path, capsys):

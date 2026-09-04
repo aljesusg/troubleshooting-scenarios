@@ -309,6 +309,20 @@ def mean_duration(agent_amended: list, conversations: list[str]) -> float | None
     return sum(durations) / len(durations)
 
 
+def format_tokens(n: int) -> str:
+    return f"{n:,}"
+
+
+def format_tokens_compact(n: int) -> str:
+    if n >= 1_000_000:
+        v = n / 1_000_000
+        return f"{v:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        v = n / 1_000
+        return f"{v:.0f}K"
+    return str(n)
+
+
 def format_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.0f}s"
@@ -431,7 +445,7 @@ def generate_overview_table(
 
     # Avg tokens
     avg_tok = {a: mean_tokens(agent_amended[a], conversations) for a in agent_names}
-    cells = [str(avg_tok[a]) if avg_tok[a] is not None else "N/A" for a in agent_names]
+    cells = [format_tokens_compact(avg_tok[a]) if avg_tok[a] is not None else "N/A" for a in agent_names]
     lines.append(f"| Avg tokens | {' | '.join(cells)} |")
 
     return "\n".join(lines)
@@ -621,7 +635,7 @@ def generate_duration_table(
 def tokens_cell(agent_amended: list, cid: str, agent: str) -> str:
     t = scenario_tokens(agent_amended, cid)
     anchor = anchor_id(agent, cid)
-    return f"[{t}](#{anchor})"
+    return f"[{format_tokens_compact(t)}](#{anchor})"
 
 
 def generate_tokens_table(
@@ -639,7 +653,7 @@ def generate_tokens_table(
 
     # Mean row
     avg_tok = {a: mean_tokens(agent_amended[a], conversations) for a in agent_names}
-    cells = [str(avg_tok[a]) if avg_tok[a] is not None else "N/A" for a in agent_names]
+    cells = [format_tokens_compact(avg_tok[a]) if avg_tok[a] is not None else "N/A" for a in agent_names]
     lines.append(f"| **Average** | {' | '.join(cells)} |")
 
     return "\n".join(lines)
