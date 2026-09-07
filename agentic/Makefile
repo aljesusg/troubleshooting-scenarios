@@ -201,14 +201,18 @@ else
 	for scenario in $(_OLS_CLASSIC); do \
 	  echo ""; \
 	  echo "==> Setup: $$scenario"; \
-	  if [ -x $$scenario/setup.sh ]; then bash $$scenario/setup.sh; fi; \
-	  bash $(SCRIPTS_DIR)/run-agentic-evals.sh \
-	    --system-config system-ols-classic.yaml \
-	    --evals $$scenario/evals-ols-classic.yaml \
-	    --eval-dir $(EVAL_DIR) \
-	    $(if $(TAG),--tags $(subst $(COMMA), ,$(TAG))); \
+	  scenario_status=0; \
+	  if [ -x $$scenario/setup.sh ]; then bash $$scenario/setup.sh || scenario_status=$$?; fi; \
+	  if [ $$scenario_status -eq 0 ]; then \
+	    bash $(SCRIPTS_DIR)/run-agentic-evals.sh \
+	      --system-config system-ols-classic.yaml \
+	      --evals $$scenario/evals-ols-classic.yaml \
+	      --eval-dir $(EVAL_DIR) \
+	      $(if $(TAG),--tags $(subst $(COMMA), ,$(TAG))) || scenario_status=$$?; \
+	  fi; \
 	  echo "==> Cleanup: $$scenario"; \
 	  if [ -x $$scenario/cleanup.sh ]; then bash $$scenario/cleanup.sh || echo "WARNING: cleanup failed (non-fatal)"; fi; \
+	  if [ $$scenario_status -ne 0 ]; then exit $$scenario_status; fi; \
 	done
 	@echo ""
 	@echo "==> Generating report..."

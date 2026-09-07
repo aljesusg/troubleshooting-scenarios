@@ -558,7 +558,8 @@ def generate_scenario_details(
                 conv_results = [r for r in results if r["conversation_group_id"] == cid]
                 for r in conv_results:
                     result_icon = "✅" if r["result"] == "PASS" else "❌"
-                    score_str = f"{r['score']:.2f}" if r["score"] is not None else "N/A"
+                    score = r.get("score")
+                    score_str = f"{score:.2f}" if score is not None else "N/A"
                     lines.append(
                         f"**Correctness**: "
                         f"{result_icon} {r['result']} (score: {score_str})"

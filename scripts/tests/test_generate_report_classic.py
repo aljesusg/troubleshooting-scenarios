@@ -257,6 +257,31 @@ class TestGenerateReport:
         assert "# Evaluation Summary" in report
         assert "s1" in report
 
+    def test_handles_null_score(self, tmp_path):
+        result = _make_result("s1")
+        result["score"] = None
+        result["result"] = "ERROR"
+        _write_run(
+            tmp_path / "gpt-5.4" / "run_1",
+            results=[result],
+            amended_entries=[{"conversation_id": "s1"}],
+        )
+        report = mod.generate_report(tmp_path)
+        assert "score: N/A" in report
+        assert "ERROR" in report
+
+    def test_handles_missing_score_key(self, tmp_path):
+        result = _make_result("s1")
+        del result["score"]
+        result["result"] = "ERROR"
+        _write_run(
+            tmp_path / "gpt-5.4" / "run_1",
+            results=[result],
+            amended_entries=[{"conversation_id": "s1"}],
+        )
+        report = mod.generate_report(tmp_path)
+        assert "score: N/A" in report
+
     def test_score_cell_links_to_agent_section(self, tmp_path):
         _write_run(
             tmp_path / "gpt-5.4" / "run_1",
