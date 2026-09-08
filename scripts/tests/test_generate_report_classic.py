@@ -151,6 +151,17 @@ class TestLoadRunSummary:
 
 
 class TestGenerateReport:
+    def test_empty_results_keep_agent_column(self, tmp_path):
+        _write_run(
+            tmp_path / "gpt-5.4" / "run_1",
+            results=[],
+            amended_entries=[],
+        )
+
+        report = mod.generate_report(tmp_path)
+
+        assert "| | gpt-5.4 |" in report
+
     def test_single_agent_single_run(self, tmp_path):
         _write_run(
             tmp_path / "gpt-5.4" / "run_1",

@@ -183,7 +183,10 @@ else
 	  fi; \
 	done
 	@pf_pid=""; \
-	trap 'if [ -n "$$pf_pid" ]; then kill $$pf_pid 2>/dev/null || true; fi' EXIT; \
+	eval_sa="ols-classic-eval"; \
+	eval_sa_created=0; \
+	eval_role_bound=0; \
+	trap 'if [ -n "$$pf_pid" ]; then kill $$pf_pid 2>/dev/null || true; fi; if [ "$$eval_role_bound" -eq 1 ]; then oc adm policy remove-cluster-role-from-user cluster-reader -z "$$eval_sa" -n openshift-lightspeed >/dev/null 2>&1 || true; fi; if [ "$$eval_sa_created" -eq 1 ]; then oc delete serviceaccount "$$eval_sa" -n openshift-lightspeed --ignore-not-found >/dev/null 2>&1 || true; fi' EXIT; \
 	if ! curl -ksf --connect-timeout 2 "https://localhost:8443/docs" >/dev/null 2>&1; then \
 	  echo "==> Starting port-forward to OLS..."; \
 	  oc port-forward -n openshift-lightspeed deployment/lightspeed-app-server 8443:8443 >/dev/null 2>&1 & \
@@ -193,11 +196,17 @@ else
 	auth_token=$$(oc whoami -t 2>/dev/null || true); \
 	if [ -z "$$auth_token" ]; then \
 	  echo "==> No OAuth token, creating service account token..."; \
-	  oc adm policy add-cluster-role-to-user cluster-admin -z default -n openshift-lightspeed >/dev/null 2>&1 || true; \
-	  auth_token=$$(oc create token default -n openshift-lightspeed --duration=1h); \
+	  if ! oc get serviceaccount "$$eval_sa" -n openshift-lightspeed >/dev/null 2>&1; then \
+	    oc create serviceaccount "$$eval_sa" -n openshift-lightspeed >/dev/null; \
+	    eval_sa_created=1; \
+	  fi; \
+	  oc adm policy add-cluster-role-to-user cluster-reader -z "$$eval_sa" -n openshift-lightspeed >/dev/null; \
+	  eval_role_bound=1; \
+	  auth_token=$$(oc create token "$$eval_sa" -n openshift-lightspeed --duration=1h); \
 	fi; \
 	export API_KEY="$$auth_token"; \
 	echo "==> Scenarios: $(_OLS_CLASSIC)"; \
+	overall_status=0; \
 	for scenario in $(_OLS_CLASSIC); do \
 	  echo ""; \
 	  echo "==> Setup: $$scenario"; \
@@ -212,14 +221,21 @@ else
 	  fi; \
 	  echo "==> Cleanup: $$scenario"; \
 	  if [ -x $$scenario/cleanup.sh ]; then bash $$scenario/cleanup.sh || echo "WARNING: cleanup failed (non-fatal)"; fi; \
-	  if [ $$scenario_status -ne 0 ]; then exit $$scenario_status; fi; \
-	done
-	@echo ""
-	@echo "==> Generating report..."
-	@../venv/bin/python3 $(SCRIPTS_DIR)/generate-report-classic.py \
-	  $(EVAL_DIR) \
-	  --output results/results_$(DATETIME).md
-	@echo "==> Results: results/results_$(DATETIME).md"
+	  if [ $$scenario_status -ne 0 ]; then overall_status=$$scenario_status; break; fi; \
+	done; \
+	if [ -n "$$(find "$(EVAL_DIR)" -name '*_summary.json' -print -quit 2>/dev/null)" ]; then \
+	  echo ""; \
+	  echo "==> Generating report..."; \
+	  ../venv/bin/python3 $(SCRIPTS_DIR)/generate-report-classic.py \
+	    $(EVAL_DIR) \
+	    --output results/results_$(DATETIME).md || report_status=$$?; \
+	  if [ $${report_status:-0} -eq 0 ]; then \
+	    echo "==> Results: results/results_$(DATETIME).md"; \
+	  elif [ $$overall_status -eq 0 ]; then \
+	    overall_status=$$report_status; \
+	  fi; \
+	fi; \
+	if [ $$overall_status -ne 0 ]; then exit $$overall_status; fi
 endif
 
 cleanup:

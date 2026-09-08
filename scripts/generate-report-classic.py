@@ -737,10 +737,13 @@ def print_correctness_table(
         return f"{pct}% ({p}/{t})"
 
     scenario_w = max(len("Scenario"), len("Pass rate"), *(len(c) for c in conversations))
-    col_widths = [
-        max(len(a), max(len(f"{r[0]}/{r[1]}") for r in col_vals), len(_footer_plain(t[0], t[1])))
-        for a, col_vals, t in zip(agent_names, zip(*grid), totals)
-    ]
+    col_widths = []
+    for index, (agent, total) in enumerate(zip(agent_names, totals, strict=True)):
+        result_width = max(
+            (len(f"{row[index][0]}/{row[index][1]}") for row in grid),
+            default=0,
+        )
+        col_widths.append(max(len(agent), result_width, len(_footer_plain(*total))))
 
     sep = "+-" + "-+-".join("-" * w for w in [scenario_w] + col_widths) + "-+"
     header = "| " + " | ".join(
