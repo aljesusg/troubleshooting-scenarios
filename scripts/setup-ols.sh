@@ -138,12 +138,7 @@ if $has_openai; then
       url: https://api.openai.com/v1
       models:
       - name: gpt-5.4
-        parameters:
-          tool_budget_ratio: 0.5
-      - name: gpt-5.5
-        parameters:
-          tool_budget_ratio: 0.5
-      - name: gpt-5.4-nano"
+      - name: gpt-5.2"
 fi
 if $has_gcp; then
   providers+="
@@ -185,7 +180,6 @@ spec:
   ols:
     defaultModel: "${OLS_DEFAULT_MODEL}"
     defaultProvider: "${OLS_DEFAULT_PROVIDER}"
-    introspectionEnabled: false
 EOF
 
 # 8. Wait for OLS to be ready

@@ -1,43 +1,28 @@
 #!/usr/bin/env python3
-"""Generate a Markdown report from NxM agentic evaluation output.
+"""Generate a Markdown report from NxM OLS Classic evaluation output.
 
-Reads the eval session directory produced by lightspeed-eval's
-behavioral orchestrator and generates a comparative report across
-agents and runs.
+Reads the eval session directory produced by lightspeed-eval and
+generates a comparative report across agents and runs.
+
+Unlike agentic evals, classic evals use a single metric
+(custom:answer_correctness) and derive duration from agent_latency
+in the results JSON.
 
 Usage:
-    python3 generate-report-agentic.py EVAL_DIR [--output FILE]
+    python3 generate-report-classic.py EVAL_DIR [--output FILE]
 
 EVAL_DIR is the eval session directory
-(e.g., eval_output/eval_20260829_210316/).
-The judge model is extracted from the summary JSON configuration.
+(e.g., results/ols-classic/20260904_124503/).
 """
 
 import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-METRIC_LABELS = {
-    "custom:openshift_agentic_run_status": "Completed",
-    "custom:openshift_agentic_run_evaluation_correctness": "Correctness",
-}
-
-CORRECTNESS_METRIC = "custom:openshift_agentic_run_evaluation_correctness"
-STATUS_METRIC = "custom:openshift_agentic_run_status"
-PHASE_CONDITIONS = (
-    ("Analysis", "Analyzed"),
-    ("Execution", "Executed"),
-    ("Verification", "Verified"),
-)
-
-
-def metric_label(metric_id: str) -> str:
-    return METRIC_LABELS.get(metric_id, metric_id.split(":")[-1])
-
+CORRECTNESS_METRIC = "custom:answer_correctness"
 
 
 def discover_agents(eval_dir: Path) -> list[str]:
@@ -89,8 +74,6 @@ def extract_judge_model(eval_dir: Path, agent_names: list[str]) -> str:
     return ""
 
 
-
-
 def load_amended_entries(run_dir: Path) -> list[dict]:
     """Load conversation entries from all amended YAMLs in a run directory."""
     files = sorted(run_dir.glob("*amended*.yaml"))
@@ -109,18 +92,6 @@ def load_amended_entries(run_dir: Path) -> list[dict]:
             if not turns:
                 continue
             turn = turns[0]
-            duration = None
-            agentic_run_results = turn.get("openshift_agentic_run_results") or {}
-            analysis_results = agentic_run_results.get("analysis", [])
-            if analysis_results:
-                conditions = analysis_results[0].get("conditions", [])
-                started = next((c["lastTransitionTime"] for c in conditions if c["type"] == "Started"), None)
-                completed = next((c["lastTransitionTime"] for c in conditions if c["type"] == "Completed"), None)
-                if started and completed:
-                    s = datetime.fromisoformat(started.replace("Z", "+00:00"))
-                    e = datetime.fromisoformat(completed.replace("Z", "+00:00"))
-                    duration = (e - s).total_seconds()
-
             agent_tok = (turn.get("api_input_tokens") or 0) + (turn.get("api_output_tokens") or 0)
 
             entries.append({
@@ -129,8 +100,7 @@ def load_amended_entries(run_dir: Path) -> list[dict]:
                 "query": turn.get("query", ""),
                 "response": turn.get("response", ""),
                 "tags": tags,
-                "agentic_run_status": turn.get("openshift_agentic_run_status") or {},
-                "analysis_duration": duration,
+                "agent_latency": turn.get("agent_latency"),
                 "agent_tokens": agent_tok,
             })
     return entries
@@ -152,23 +122,23 @@ def collect_conversations(agent_runs: dict[str, list]) -> list[str]:
     return conversations
 
 
-def get_score(results: list[dict], conversation_id: str, metric_id: str) -> float | None:
+def get_score(results: list[dict], conversation_id: str) -> float | None:
     for r in results:
-        if r["conversation_group_id"] == conversation_id and r["metric_identifier"] == metric_id:
+        if r["conversation_group_id"] == conversation_id and r["metric_identifier"] == CORRECTNESS_METRIC:
             return r.get("score")
     return None
 
 
-def get_result(results: list[dict], conversation_id: str, metric_id: str) -> str | None:
+def get_result(results: list[dict], conversation_id: str) -> str | None:
     for r in results:
-        if r["conversation_group_id"] == conversation_id and r["metric_identifier"] == metric_id:
+        if r["conversation_group_id"] == conversation_id and r["metric_identifier"] == CORRECTNESS_METRIC:
             return r.get("result")
     return None
 
 
-def get_judge_reason(results: list[dict], conversation_id: str, metric_id: str) -> str:
+def get_judge_reason(results: list[dict], conversation_id: str) -> str:
     for r in results:
-        if r["conversation_group_id"] == conversation_id and r["metric_identifier"] == metric_id:
+        if r["conversation_group_id"] == conversation_id and r["metric_identifier"] == CORRECTNESS_METRIC:
             for js in r.get("judge_scores") or []:
                 reason = js.get("reason", "")
                 if reason:
@@ -176,44 +146,24 @@ def get_judge_reason(results: list[dict], conversation_id: str, metric_id: str) 
     return ""
 
 
-def get_performance_result(
-    results: list[dict], conversation_id: str
-) -> tuple[str | None, float | None]:
-    """Return the preferred result and score for performance reporting.
-
-    Correctness is preferred when configured. Status-only evaluations do not
-    emit a correctness result, so use their deterministic status result.
-    """
-    for metric_id in (CORRECTNESS_METRIC, STATUS_METRIC):
-        result = get_result(results, conversation_id, metric_id)
-        if result is not None:
-            return result, get_score(results, conversation_id, metric_id)
-    return None, None
+def get_agent_latency(results: list[dict], conversation_id: str) -> float | None:
+    for r in results:
+        if r["conversation_group_id"] == conversation_id and r["metric_identifier"] == CORRECTNESS_METRIC:
+            return r.get("agent_latency")
+    return None
 
 
 def anchor_id(agent: str, conversation_id: str) -> str:
     return f"{agent}--{conversation_id}"
 
 
-def strip_request_section(response: str) -> str:
-    match = re.search(r'^## Analysis\b', response, re.MULTILINE)
-    if match:
-        return response[match.start():]
-    return response
-
-
 def score_cell(agent_runs: list, conversation_id: str, agent: str) -> str:
-    """Build a summary table cell for one agent + one conversation.
-
-    With 1 run: show the score directly.
-    With N runs: show passed/total.
-    Links to the first run section for that agent+scenario.
-    """
     scores = []
     for results in agent_runs:
         if results is None:
             continue
-        result, score = get_performance_result(results, conversation_id)
+        score = get_score(results, conversation_id)
+        result = get_result(results, conversation_id)
         if result is not None:
             scores.append((result, score))
 
@@ -244,71 +194,6 @@ def format_timestamp(timestamp: str) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def overall_score(agent_runs: list, conversations: list[str]) -> tuple[int, int]:
-    """Return (passed, total) across all runs and conversations."""
-    passed = 0
-    total = 0
-    for results in agent_runs:
-        if results is None:
-            continue
-        for cid in conversations:
-            result, _ = get_performance_result(results, cid)
-            if result is not None:
-                total += 1
-                if result == "PASS":
-                    passed += 1
-    return passed, total
-
-
-def overall_score_cell(passed: int, total: int, bold: bool = False) -> str:
-    if total == 0:
-        return "N/A"
-    pct = round(100 * passed / total)
-    text = f"{pct}% ({passed}/{total})"
-    if bold:
-        text = f"**{text}**"
-    return text
-
-
-def scenario_mean_score(agent_runs: list, conversation_id: str) -> float | None:
-    """Mean correctness score for one agent on one scenario across all runs."""
-    scores = []
-    for results in agent_runs:
-        if results is None:
-            continue
-        s = get_score(results, conversation_id, CORRECTNESS_METRIC)
-        if s is not None:
-            scores.append(s)
-    return sum(scores) / len(scores) if scores else None
-
-
-def mean_score(agent_runs: list, conversations: list[str]) -> float | None:
-    """Mean correctness score across all runs and conversations."""
-    scores = []
-    for results in agent_runs:
-        if results is None:
-            continue
-        for cid in conversations:
-            _, score = get_performance_result(results, cid)
-            if score is not None:
-                scores.append(score)
-    if not scores:
-        return None
-    return sum(scores) / len(scores)
-
-
-def mean_duration(agent_amended: list, conversations: list[str]) -> float | None:
-    """Mean analysis duration (seconds) across all runs and conversations."""
-    durations = []
-    for entries in agent_amended:
-        for entry in entries:
-            if entry["conversation_group_id"] in conversations and entry.get("analysis_duration") is not None:
-                durations.append(entry["analysis_duration"])
-    if not durations:
-        return None
-    return sum(durations) / len(durations)
-
-
 def format_tokens(n: int) -> str:
     return f"{n:,}"
 
@@ -331,20 +216,89 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m {secs}s"
 
 
-def scenario_duration(agent_amended: list, cid: str) -> float | None:
-    """Mean analysis duration for a single scenario across runs."""
-    durations = []
-    for entries in agent_amended:
-        for entry in entries:
-            if entry["conversation_group_id"] == cid and entry.get("analysis_duration") is not None:
-                durations.append(entry["analysis_duration"])
-    if not durations:
+def overall_score(agent_runs: list, conversations: list[str]) -> tuple[int, int]:
+    passed = 0
+    total = 0
+    for results in agent_runs:
+        if results is None:
+            continue
+        for cid in conversations:
+            result = get_result(results, cid)
+            if result is not None:
+                total += 1
+                if result == "PASS":
+                    passed += 1
+    return passed, total
+
+
+def overall_score_cell(passed: int, total: int, bold: bool = False) -> str:
+    if total == 0:
+        return "N/A"
+    pct = round(100 * passed / total)
+    if passed == total:
+        icon = "✅ "
+    elif passed == 0:
+        icon = "❌ "
+    else:
+        icon = ""
+    text = f"{icon}{pct}% ({passed}/{total})"
+    if bold:
+        text = f"**{text}**"
+    return text
+
+
+def scenario_mean_score(agent_runs: list, conversation_id: str) -> float | None:
+    scores = []
+    for results in agent_runs:
+        if results is None:
+            continue
+        s = get_score(results, conversation_id)
+        if s is not None:
+            scores.append(s)
+    return sum(scores) / len(scores) if scores else None
+
+
+def mean_score(agent_runs: list, conversations: list[str]) -> float | None:
+    scores = []
+    for results in agent_runs:
+        if results is None:
+            continue
+        for cid in conversations:
+            s = get_score(results, cid)
+            if s is not None:
+                scores.append(s)
+    if not scores:
         return None
-    return sum(durations) / len(durations)
+    return sum(scores) / len(scores)
+
+
+def scenario_latency(agent_runs: list, conversation_id: str) -> float | None:
+    """Mean agent_latency for a single scenario across runs."""
+    latencies = []
+    for results in agent_runs:
+        if results is None:
+            continue
+        lat = get_agent_latency(results, conversation_id)
+        if lat is not None:
+            latencies.append(lat)
+    return sum(latencies) / len(latencies) if latencies else None
+
+
+def mean_latency(agent_runs: list, conversations: list[str]) -> float | None:
+    latencies = []
+    for results in agent_runs:
+        if results is None:
+            continue
+        for cid in conversations:
+            lat = get_agent_latency(results, cid)
+            if lat is not None:
+                latencies.append(lat)
+    if not latencies:
+        return None
+    return sum(latencies) / len(latencies)
 
 
 def scenario_tokens(agent_amended: list, cid: str) -> int:
-    """Total agent tokens for a single scenario across runs."""
     total = 0
     for entries in agent_amended:
         for entry in entries:
@@ -354,7 +308,6 @@ def scenario_tokens(agent_amended: list, cid: str) -> int:
 
 
 def total_tokens(agent_amended: list, conversations: list[str]) -> int:
-    """Total agent tokens across all scenarios and runs."""
     total = 0
     for entries in agent_amended:
         for entry in entries:
@@ -364,7 +317,6 @@ def total_tokens(agent_amended: list, conversations: list[str]) -> int:
 
 
 def mean_tokens(agent_amended: list, conversations: list[str]) -> int | None:
-    """Mean agent tokens across all runs and conversations."""
     tokens = []
     for entries in agent_amended:
         for entry in entries:
@@ -373,19 +325,6 @@ def mean_tokens(agent_amended: list, conversations: list[str]) -> int | None:
     if not tokens:
         return None
     return round(sum(tokens) / len(tokens))
-
-
-def bold_best(values: dict[str, str | None], best_val, cmp="max") -> dict[str, str]:
-    """Bold the best value(s) in a dict of agent -> formatted string."""
-    result = {}
-    for a, text in values.items():
-        if text is None:
-            result[a] = "N/A"
-        elif best_val is not None and text == best_val:
-            result[a] = f"**{text}**"
-        else:
-            result[a] = text
-    return result
 
 
 def generate_overview_table(
@@ -428,233 +367,25 @@ def generate_overview_table(
             cells.append(text)
     lines.append(f"| Avg score | {' | '.join(cells)} |")
 
-    # Mean duration
-    mean_durations = {a: mean_duration(agent_amended[a], conversations) for a in agent_names}
-    best_dur = min((d for d in mean_durations.values() if d is not None), default=None)
+    # Mean latency
+    mean_latencies = {a: mean_latency(agent_runs[a], conversations) for a in agent_names}
+    best_lat = min((d for d in mean_latencies.values() if d is not None), default=None)
     cells = []
     for a in agent_names:
-        d = mean_durations[a]
+        d = mean_latencies[a]
         if d is None:
             cells.append("N/A")
         else:
             text = format_duration(d)
-            if best_dur is not None and d == best_dur:
+            if best_lat is not None and d == best_lat:
                 text = f"**{text}**"
             cells.append(text)
-    lines.append(f"| Avg duration | {' | '.join(cells)} |")
+    lines.append(f"| Avg latency | {' | '.join(cells)} |")
 
     # Avg tokens
     avg_tok = {a: mean_tokens(agent_amended[a], conversations) for a in agent_names}
     cells = [format_tokens_compact(avg_tok[a]) if avg_tok[a] is not None else "N/A" for a in agent_names]
     lines.append(f"| Avg tokens | {' | '.join(cells)} |")
-
-    return "\n".join(lines)
-
-
-def duration_cell(agent_amended: list, cid: str, agent: str) -> str:
-    d = scenario_duration(agent_amended, cid)
-    if d is None:
-        return "N/A"
-    anchor = anchor_id(agent, cid)
-    return f"[{format_duration(d)}](#{anchor})"
-
-
-def remediation_conversations(
-    conversations: list[str], agent_amended: dict[str, list]
-) -> list[str]:
-    """Return evaluated conversations tagged for remediation."""
-    remediation = []
-    for cid in conversations:
-        for runs in agent_amended.values():
-            if any(
-                entry["conversation_group_id"] == cid
-                and "remediation" in entry.get("tags", [])
-                for entries in runs
-                for entry in entries
-            ):
-                remediation.append(cid)
-                break
-    return remediation
-
-
-def phase_status(entries: list[dict], conversation_id: str, condition_type: str) -> str:
-    """Return Completed only when the AgenticRun phase condition is true."""
-    for entry in entries:
-        if entry["conversation_group_id"] != conversation_id:
-            continue
-        for condition in entry.get("agentic_run_status", {}).get("conditions", []):
-            if condition.get("type") == condition_type:
-                if str(condition.get("status", "")).lower() == "true":
-                    return "Completed"
-                if "timed out" in json.dumps(condition).lower():
-                    return "TimedOut"
-                return "Failed"
-        return "Failed"
-    return "Failed"
-
-
-def phase_count(agent_amended: list, cid: str, condition_type: str) -> tuple[int, int]:
-    """Return completed and total runs for one remediation phase."""
-    statuses = [
-        phase_status(entries, cid, condition_type)
-        for entries in agent_amended
-        if any(entry["conversation_group_id"] == cid for entry in entries)
-    ]
-    return sum(status == "Completed" for status in statuses), len(statuses)
-
-
-def phase_rate_cell(completed: int, total: int, bold: bool = False) -> str:
-    """Format a phase pass rate using the Correctness table convention."""
-    if total == 0:
-        return "N/A"
-    pct = round(100 * completed / total)
-    text = f"{pct}% ({completed}/{total})"
-    return f"**{text}**" if bold else text
-
-
-def phase_breakdown_cell(agent_amended: list, cid: str, agent: str) -> str:
-    """Build one linked phase-summary cell for an agent and conversation."""
-    phases = []
-    for label, condition_type in PHASE_CONDITIONS:
-        statuses = [
-            phase_status(entries, cid, condition_type)
-            for entries in agent_amended
-            if any(entry["conversation_group_id"] == cid for entry in entries)
-        ]
-        completed = sum(status == "Completed" for status in statuses)
-        total = len(statuses)
-        text = f"{completed}/{total}"
-        if total and completed == total:
-            text = f"✅ {text}"
-        elif "TimedOut" in statuses:
-            text = f"⏳ {text}"
-        elif completed == 0:
-            text = f"❌ {text}"
-        phases.append(f"{label[0]} {text}")
-    return f"[{'<br>'.join(phases)}](#{anchor_id(agent, cid)})"
-
-
-def generate_phase_breakdown_table(
-    conversations: list[str], agent_names: list[str], agent_amended: dict[str, list]
-) -> str:
-    """Render per-phase outcomes for remediation scenarios."""
-    header = "| Scenario | " + " | ".join(agent_names) + " |"
-    separator = "|---|" + "|".join("---" for _ in agent_names) + "|"
-    lines = [header, separator]
-    for cid in conversations:
-        anchor = cid.lower().replace(" ", "-")
-        cells = [phase_breakdown_cell(agent_amended[agent], cid, agent) for agent in agent_names]
-        lines.append(f"| [{cid}](#{anchor}) | {' | '.join(cells)} |")
-
-    phase_totals = {
-        agent: {
-            condition_type: tuple(
-                sum(values[index] for values in (
-                    phase_count(agent_amended[agent], cid, condition_type)
-                    for cid in conversations
-                ))
-                for index in (0, 1)
-            )
-            for _, condition_type in PHASE_CONDITIONS
-        }
-        for agent in agent_names
-    }
-    best_rates = {
-        condition_type: max(
-            (
-                completed / total
-                for completed, total in (
-                    phase_totals[agent][condition_type] for agent in agent_names
-                )
-                if total > 0
-            ),
-            default=None,
-        )
-        for _, condition_type in PHASE_CONDITIONS
-    }
-    cells = []
-    for agent in agent_names:
-        rates = []
-        for label, condition_type in PHASE_CONDITIONS:
-            completed, total = phase_totals[agent][condition_type]
-            rates.append(
-                f"{label[0]} {phase_rate_cell(
-                    completed,
-                    total,
-                    bold=total > 0 and completed / total == best_rates[condition_type],
-                )}"
-            )
-        cells.append("<br>".join(rates))
-    lines.append(f"| **Pass rate** | {' | '.join(cells)} |")
-    return "\n".join(lines)
-
-
-def generate_duration_table(
-    conversations: list[str],
-    agent_names: list[str],
-    agent_amended: dict[str, list],
-) -> str:
-    header = "| Scenario | " + " | ".join(agent_names) + " |"
-    separator = "|---|" + "|".join("---" for _ in agent_names) + "|"
-    lines = [header, separator]
-    for cid in conversations:
-        durations = {a: scenario_duration(agent_amended[a], cid) for a in agent_names}
-        best = min((d for d in durations.values() if d is not None), default=None)
-        cells = []
-        for a in agent_names:
-            d = durations[a]
-            if d is None:
-                cells.append("N/A")
-            else:
-                anchor = anchor_id(a, cid)
-                text = f"[{format_duration(d)}](#{anchor})"
-                if best is not None and d == best:
-                    text = f"**{text}**"
-                cells.append(text)
-        cid_anchor = cid.lower().replace(" ", "-")
-        lines.append(f"| [{cid}](#{cid_anchor}) | {' | '.join(cells)} |")
-
-    # Mean row
-    mean_durations = {a: mean_duration(agent_amended[a], conversations) for a in agent_names}
-    best_mean = min((d for d in mean_durations.values() if d is not None), default=None)
-    cells = []
-    for a in agent_names:
-        d = mean_durations[a]
-        if d is None:
-            cells.append("N/A")
-        else:
-            text = format_duration(d)
-            if best_mean is not None and d == best_mean:
-                text = f"**{text}**"
-            cells.append(text)
-    lines.append(f"| **Average** | {' | '.join(cells)} |")
-
-    return "\n".join(lines)
-
-
-def tokens_cell(agent_amended: list, cid: str, agent: str) -> str:
-    t = scenario_tokens(agent_amended, cid)
-    anchor = anchor_id(agent, cid)
-    return f"[{format_tokens_compact(t)}](#{anchor})"
-
-
-def generate_tokens_table(
-    conversations: list[str],
-    agent_names: list[str],
-    agent_amended: dict[str, list],
-) -> str:
-    header = "| Scenario | " + " | ".join(agent_names) + " |"
-    separator = "|---|" + "|".join("---" for _ in agent_names) + "|"
-    lines = [header, separator]
-    for cid in conversations:
-        cells = [tokens_cell(agent_amended[a], cid, a) for a in agent_names]
-        cid_anchor = cid.lower().replace(" ", "-")
-        lines.append(f"| [{cid}](#{cid_anchor}) | {' | '.join(cells)} |")
-
-    # Mean row
-    avg_tok = {a: mean_tokens(agent_amended[a], conversations) for a in agent_names}
-    cells = [format_tokens_compact(avg_tok[a]) if avg_tok[a] is not None else "N/A" for a in agent_names]
-    lines.append(f"| **Average** | {' | '.join(cells)} |")
 
     return "\n".join(lines)
 
@@ -694,13 +425,77 @@ def generate_summary_table(
     return "\n".join(lines)
 
 
+def generate_latency_table(
+    conversations: list[str],
+    agent_names: list[str],
+    agent_runs: dict[str, list],
+) -> str:
+    header = "| Scenario | " + " | ".join(agent_names) + " |"
+    separator = "|---|" + "|".join("---" for _ in agent_names) + "|"
+    lines = [header, separator]
+    for cid in conversations:
+        latencies = {a: scenario_latency(agent_runs[a], cid) for a in agent_names}
+        best = min((d for d in latencies.values() if d is not None), default=None)
+        cells = []
+        for a in agent_names:
+            d = latencies[a]
+            if d is None:
+                cells.append("N/A")
+            else:
+                anc = anchor_id(a, cid)
+                text = f"[{format_duration(d)}](#{anc})"
+                if best is not None and d == best:
+                    text = f"**{text}**"
+                cells.append(text)
+        cid_anchor = cid.lower().replace(" ", "-")
+        lines.append(f"| [{cid}](#{cid_anchor}) | {' | '.join(cells)} |")
+
+    mean_latencies = {a: mean_latency(agent_runs[a], conversations) for a in agent_names}
+    best_mean = min((d for d in mean_latencies.values() if d is not None), default=None)
+    cells = []
+    for a in agent_names:
+        d = mean_latencies[a]
+        if d is None:
+            cells.append("N/A")
+        else:
+            text = format_duration(d)
+            if best_mean is not None and d == best_mean:
+                text = f"**{text}**"
+            cells.append(text)
+    lines.append(f"| **Average** | {' | '.join(cells)} |")
+
+    return "\n".join(lines)
+
+
+def generate_tokens_table(
+    conversations: list[str],
+    agent_names: list[str],
+    agent_amended: dict[str, list],
+) -> str:
+    header = "| Scenario | " + " | ".join(agent_names) + " |"
+    separator = "|---|" + "|".join("---" for _ in agent_names) + "|"
+    lines = [header, separator]
+    for cid in conversations:
+        cells = []
+        for a in agent_names:
+            t = scenario_tokens(agent_amended[a], cid)
+            anc = anchor_id(a, cid)
+            cells.append(f"[{format_tokens_compact(t)}](#{anc})")
+        cid_anchor = cid.lower().replace(" ", "-")
+        lines.append(f"| [{cid}](#{cid_anchor}) | {' | '.join(cells)} |")
+
+    avg_tok = {a: mean_tokens(agent_amended[a], conversations) for a in agent_names}
+    cells = [format_tokens_compact(avg_tok[a]) if avg_tok[a] is not None else "N/A" for a in agent_names]
+    lines.append(f"| **Average** | {' | '.join(cells)} |")
+
+    return "\n".join(lines)
+
 
 def generate_scenario_details(
     conversations: list[str],
     agent_names: list[str],
     agent_runs: dict[str, list],
     agent_amended: dict[str, list],
-    agent_run_dirs: dict[str, list[Path]],
 ) -> str:
     lines = []
 
@@ -708,7 +503,6 @@ def generate_scenario_details(
         lines.append(f"## {cid}")
         lines.append("")
 
-        # Find description, tags, and query from any agent's data
         description = None
         tags = None
         query = None
@@ -741,7 +535,6 @@ def generate_scenario_details(
             lines.append("```")
             lines.append("")
 
-        # Per agent, per run
         for agent in agent_names:
             runs = agent_runs[agent]
             amended_runs = agent_amended[agent]
@@ -762,14 +555,13 @@ def generate_scenario_details(
                     lines.append(f"### {agent}")
                 lines.append("")
 
-                # Metrics for this conversation
                 conv_results = [r for r in results if r["conversation_group_id"] == cid]
                 for r in conv_results:
                     result_icon = "✅" if r["result"] == "PASS" else "❌"
                     score = r.get("score")
                     score_str = f"{score:.2f}" if score is not None else "N/A"
                     lines.append(
-                        f"**{metric_label(r['metric_identifier'])}**: "
+                        f"**Correctness**: "
                         f"{result_icon} {r['result']} (score: {score_str})"
                     )
 
@@ -781,24 +573,18 @@ def generate_scenario_details(
 
                     lines.append("")
 
-                if tags and "remediation" in tags:
-                    phase_entries = [
-                        entry for entry in amended_entries if entry["conversation_group_id"] == cid
-                    ]
-                    for label, condition_type in PHASE_CONDITIONS:
-                        status = phase_status(phase_entries, cid, condition_type)
-                        icon = "✅" if status == "Completed" else "❌"
-                        lines.append(f"**{label}**: {icon} {status}")
-                    lines.append("")
+                    lat = r.get("agent_latency")
+                    if lat is not None:
+                        lines.append(f"**Latency**: {format_duration(lat)}")
+                        lines.append("")
 
-                # Analysis duration
+                # Tokens
                 for entry in amended_entries:
-                    if entry["conversation_group_id"] == cid and entry.get("analysis_duration") is not None:
-                        lines.append(f"**Duration**: {format_duration(entry['analysis_duration'])}")
+                    if entry["conversation_group_id"] == cid and entry.get("agent_tokens"):
+                        lines.append(f"**Tokens**: {format_tokens(entry['agent_tokens'])}")
                         lines.append("")
                         break
 
-                # Response
                 response = None
                 for entry in amended_entries:
                     if entry["conversation_group_id"] == cid and entry.get("response"):
@@ -807,7 +593,7 @@ def generate_scenario_details(
 
                 if response:
                     lines.append("````markdown")
-                    lines.append(strip_request_section(response).strip())
+                    lines.append(response.strip())
                     lines.append("````")
                     lines.append("")
 
@@ -820,13 +606,10 @@ def generate_scenario_details(
 def generate_report(eval_dir: Path) -> str:
     agent_names = discover_agents(eval_dir)
 
-    # Load per-run data for each agent
     agent_runs: dict[str, list] = {}
     agent_amended: dict[str, list] = {}
-    agent_run_dirs_map: dict[str, list[Path]] = {}
     for agent in agent_names:
         run_dirs = find_run_dirs(eval_dir, agent)
-        agent_run_dirs_map[agent] = run_dirs
         runs = []
         amended = []
         for rd in run_dirs:
@@ -838,7 +621,6 @@ def generate_report(eval_dir: Path) -> str:
     conversations = collect_conversations(agent_runs)
     repeat = max((len(find_run_dirs(eval_dir, a)) for a in agent_names), default=1)
 
-    # Extract timestamp from first available summary JSON
     timestamp_str = ""
     for agent in agent_names:
         run_dirs = find_run_dirs(eval_dir, agent)
@@ -855,7 +637,6 @@ def generate_report(eval_dir: Path) -> str:
 
     judge = extract_judge_model(eval_dir, agent_names)
 
-    # Build the report
     lines = ["# Evaluation Summary"]
     lines.append("")
     stats = (
@@ -872,13 +653,11 @@ def generate_report(eval_dir: Path) -> str:
     lines.append(" | ".join(parts))
     lines.append("")
 
-    # Overview table
     lines.append(generate_overview_table(
         conversations, agent_names, agent_runs, agent_amended
     ))
     lines.append("")
 
-    # Results per scenario
     lines.append("## Correctness")
     lines.append("")
     lines.append("Passed repeats / total repeats."
@@ -887,40 +666,26 @@ def generate_report(eval_dir: Path) -> str:
     lines.append(generate_summary_table(conversations, agent_names, agent_runs))
     lines.append("")
 
-    remediation = remediation_conversations(conversations, agent_amended)
-    if remediation:
-        lines.append("## Correctness breakdown by Phase")
-        lines.append("")
-        lines.append("A = Analysis; E = Execution; V = Verification.")
-        lines.append("")
-        lines.append(generate_phase_breakdown_table(remediation, agent_names, agent_amended))
-        lines.append("")
-
-    # Duration per scenario
-    lines.append("## Time")
+    lines.append("## Latency")
     lines.append("")
-    lines.append("Average duration across all repeats of a scenario per agent.")
+    lines.append("Average agent latency across all repeats of a scenario per agent.")
     lines.append("")
-    lines.append(generate_duration_table(conversations, agent_names, agent_amended))
+    lines.append(generate_latency_table(conversations, agent_names, agent_runs))
     lines.append("")
 
-    # Tokens per scenario
     lines.append("## Cost")
     lines.append("")
     lines.append("Total token usage for each scenario across all repeats per agent;"
-                 " the Average row shows average usage per evaluation."
-                 " **Note: lightspeed-eval does not expose this data yet;"
-                 " values will appear once it does.**")
+                 " the Average row shows average usage per evaluation.")
     lines.append("")
     lines.append(generate_tokens_table(conversations, agent_names, agent_amended))
     lines.append("")
 
-    # Scenario details
     lines.append("# Scenarios")
     lines.append("")
     lines.append(
         generate_scenario_details(
-            conversations, agent_names, agent_runs, agent_amended, agent_run_dirs_map
+            conversations, agent_names, agent_runs, agent_amended
         )
     )
 
@@ -938,7 +703,7 @@ def _scenario_pass_total(agent_runs: list, conversation_id: str) -> tuple[int, i
     for results in agent_runs:
         if results is None:
             continue
-        result, _ = get_performance_result(results, conversation_id)
+        result = get_result(results, conversation_id)
         if result is not None:
             total += 1
             if result == "PASS":
@@ -972,10 +737,13 @@ def print_correctness_table(
         return f"{pct}% ({p}/{t})"
 
     scenario_w = max(len("Scenario"), len("Pass rate"), *(len(c) for c in conversations))
-    col_widths = [
-        max(len(a), max(len(f"{r[0]}/{r[1]}") for r in col_vals), len(_footer_plain(t[0], t[1])))
-        for a, col_vals, t in zip(agent_names, zip(*grid), totals)
-    ]
+    col_widths = []
+    for index, (agent, total) in enumerate(zip(agent_names, totals, strict=True)):
+        result_width = max(
+            (len(f"{row[index][0]}/{row[index][1]}") for row in grid),
+            default=0,
+        )
+        col_widths.append(max(len(agent), result_width, len(_footer_plain(*total))))
 
     sep = "+-" + "-+-".join("-" * w for w in [scenario_w] + col_widths) + "-+"
     header = "| " + " | ".join(
@@ -1008,7 +776,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Generate Markdown report from NxM agentic evaluation output",
+        description="Generate Markdown report from NxM OLS Classic evaluation output",
     )
     parser.add_argument(
         "eval_dir",
