@@ -766,7 +766,7 @@ def generate_scenario_details(
 
                     lines.append("")
 
-                if "remediation" in tags:
+                if tags and "remediation" in tags:
                     phase_entries = [
                         entry for entry in amended_entries if entry["conversation_group_id"] == cid
                     ]
