@@ -209,8 +209,11 @@ else
 	    oc create serviceaccount "$$eval_sa" -n openshift-lightspeed >/dev/null; \
 	    eval_sa_created=1; \
 	  fi; \
-	  oc adm policy add-cluster-role-to-user cluster-reader -z "$$eval_sa" -n openshift-lightspeed >/dev/null; \
-	  eval_role_bound=1; \
+	  if ! oc get clusterrolebinding -o jsonpath='{range .items[*]}{.roleRef.name}{"|"}{range .subjects[*]}{.kind}:{.namespace}:{.name}{" "}{end}{"\n"}{end}' 2>/dev/null \
+	      | grep -q "^cluster-reader|.*ServiceAccount:openshift-lightspeed:$$eval_sa"; then \
+	    oc adm policy add-cluster-role-to-user cluster-reader -z "$$eval_sa" -n openshift-lightspeed >/dev/null; \
+	    eval_role_bound=1; \
+	  fi; \
 	  auth_token=$$(oc create token "$$eval_sa" -n openshift-lightspeed --duration=1h); \
 	fi; \
 	export API_KEY="$$auth_token"; \
