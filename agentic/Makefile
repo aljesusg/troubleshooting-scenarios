@@ -182,6 +182,7 @@ else
 	    exit 1; \
 	  fi; \
 	done
+	@bash $(SCRIPTS_DIR)/preflight.sh --require-ols
 	@pf_pid=""; \
 	eval_sa="ols-classic-eval"; \
 	eval_sa_created=0; \
@@ -191,7 +192,15 @@ else
 	  echo "==> Starting port-forward to OLS..."; \
 	  oc port-forward -n openshift-lightspeed deployment/lightspeed-app-server 8443:8443 >/dev/null 2>&1 & \
 	  pf_pid=$$!; \
-	  sleep 3; \
+	  ols_ok=false; \
+	  for i in $$(seq 1 30); do \
+	    if curl -ksf --connect-timeout 2 "https://localhost:8443/docs" >/dev/null 2>&1; then ols_ok=true; break; fi; \
+	    sleep 2; \
+	  done; \
+	  if [ "$$ols_ok" != "true" ]; then \
+	    echo "Error: OLS not reachable at https://localhost:8443 after port-forward attempt"; \
+	    exit 1; \
+	  fi; \
 	fi; \
 	auth_token=$$(oc whoami -t 2>/dev/null || true); \
 	if [ -z "$$auth_token" ]; then \
