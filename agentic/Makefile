@@ -64,6 +64,7 @@ OLS_CLASSIC_SCENARIOS := \
 	unready_pod_alert
 SCENARIO ?=
 TAG ?=
+AGENT ?=
 SETUP_MODE ?= run
 
 COMMA := ,
@@ -125,7 +126,11 @@ else
 	done
 	$(eval DATETIME := $(shell date +%Y%m%d_%H%M%S))
 	$(eval EVAL_DIR := results/logs/$(DATETIME))
+ifdef AGENT
+	$(eval _AGENTS := $(strip $(subst $(COMMA), ,$(AGENT))))
+else
 	$(eval _AGENTS := $(shell ../venv/bin/python3 -c "import yaml; c=yaml.safe_load(open('system.yaml')); print(' '.join(c.get('agents',{}).get('default',{}).get('agent',[])))"))
+endif
 	$(eval _REPEAT := $(shell ../venv/bin/python3 -c "import yaml; c=yaml.safe_load(open('system.yaml')); print(c.get('agents',{}).get('default',{}).get('repeat',1))"))
 ifeq ($(SETUP_MODE),run)
 	@echo "==> SETUP_MODE=run: $(_REPEAT) repeat(s), agents: $(subst $(SPACE),$(COMMA) ,$(_AGENTS))"
@@ -276,10 +281,12 @@ help:
 	@echo "  TAG=...                   Filter by tag (default: none)"
 	@echo ""
 	@echo "Options (eval):"
+	@echo "  AGENT=...                 Comma-separated agent model(s) to run (default: all from system.yaml)"
 	@echo "  SETUP_MODE=run|scenario   Setup/cleanup lifecycle (default: run)"
 	@echo "    run:      per (scenario, agent, repeat) - for mutating agents"
 	@echo "    scenario: per scenario - for read-only agents, parallel OK"
-	@echo "  Agents and repeat count are read from system.yaml."
+	@echo "  Agents and repeat count are read from system.yaml.(agents can be overridden with AGENT=)."
+	@echo "  Example: make eval AGENT=gpt-5.4,gemini-2.5-pro SCENARIO=blocked_deployment"
 	@echo ""
 	@echo "Options (eval-ols-classic):"
 	@echo "  Agents and repeat count are read from system-ols-classic.yaml."

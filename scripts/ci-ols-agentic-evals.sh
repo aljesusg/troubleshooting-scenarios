@@ -7,8 +7,8 @@
 #   GOOGLE_APPLICATION_CREDENTIALS  - Path to GCP service account JSON (Vertex AI)
 #   VERTEX_PROJECT_ID               - GCP project ID (falls back to credentials JSON)
 #   VERTEX_REGION                   - GCP region (default: us-east1)
-#   AGENT_NAME                      - Agent to use: openai (OpenAI), gemini (Google), opus (Anthropic)
-#   SUITES                          - Space-separated scenario list (default: all)
+#   AGENT                           - Agent model to use: gpt-5.4, gemini-2.5-pro, claude-opus-4-6
+#   SCENARIOS                       - Space-separated scenario list (default: all)
 #   ARTIFACT_DIR                    - CI artifact directory (default: /tmp/artifacts)
 
 set -euo pipefail
@@ -28,15 +28,22 @@ function install_operator() {
     echo "==> Operator installed."
 }
 
-function setup_openai() {
-    echo "==> Setting up OpenAI provider..."
+function setup_openai_secret() {
+    echo "==> Setting up OpenAI secret for judge LLM..."
     : "${OPENAI_API_KEY:?OPENAI_API_KEY must be set}"
 
     oc create secret generic llm-creds-openai -n "$NAMESPACE" \
         --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
         --dry-run=client -o yaml | oc apply -f -
 
-    oc apply -f - <<'EOF'
+    echo "    OpenAI secret configured."
+}
+
+function setup_openai_agent() {
+    local AGENT_MODEL="$1"
+    echo "==> Setting up OpenAI agent with model: ${AGENT_MODEL}..."
+
+    oc apply -f - <<EOF
 apiVersion: agentic.openshift.io/v1alpha1
 kind: LLMProvider
 metadata:
@@ -56,17 +63,18 @@ metadata:
 spec:
   llmProvider:
     name: openai
-  model: "gpt-5.4"
+  model: "${AGENT_MODEL}"
   timeouts:
     analysisSeconds: 600
     executionSeconds: 600
     verificationSeconds: 600
 EOF
-    echo "    OpenAI provider configured."
+    echo "    OpenAI agent configured with model: ${AGENT_MODEL}"
 }
 
 function setup_vertex() {
-    echo "==> Setting up Vertex AI providers..."
+    local AGENT_MODEL="$1"
+    echo "==> Setting up Vertex AI provider for ${AGENT_MODEL}..."
     : "${GOOGLE_APPLICATION_CREDENTIALS:?GOOGLE_APPLICATION_CREDENTIALS must be set}"
 
     if [[ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]]; then
@@ -78,152 +86,121 @@ function setup_vertex() {
         VERTEX_PROJECT_ID=$(python3 -c "import json; print(json.load(open('$GOOGLE_APPLICATION_CREDENTIALS'))['project_id'])")
         echo "    Extracted project ID from credentials: $VERTEX_PROJECT_ID"
     fi
-    VERTEX_REGION="${VERTEX_REGION:-us-east1}"
 
     oc create secret generic llm-creds-vertex -n "$NAMESPACE" \
         --from-file=GOOGLE_APPLICATION_CREDENTIALS="$GOOGLE_APPLICATION_CREDENTIALS" \
         --dry-run=client -o yaml | oc apply -f -
 
+    # Determine provider type and agent name based on model
+    case "$AGENT_MODEL" in
+        claude-opus-4-6)
+            VERTEX_REGION="${VERTEX_REGION:-us-east1}"
+            PROVIDER_NAME="vertex-anthropic"
+            MODEL_PROVIDER="Anthropic"
+            AGENT_NAME="opus"
+            ;;
+        gemini-2.5-pro)
+            VERTEX_REGION="global"
+            PROVIDER_NAME="vertex-google"
+            MODEL_PROVIDER="Google"
+            AGENT_NAME="gemini"
+            ;;
+        *)
+            echo "ERROR: Unknown Vertex model: ${AGENT_MODEL}"
+            exit 1
+            ;;
+    esac
+
     oc apply -f - <<EOF
 apiVersion: agentic.openshift.io/v1alpha1
 kind: LLMProvider
 metadata:
-  name: vertex-anthropic
+  name: ${PROVIDER_NAME}
   namespace: $NAMESPACE
 spec:
   type: GoogleCloudVertex
   googleCloudVertex:
     projectID: $VERTEX_PROJECT_ID
     region: $VERTEX_REGION
-    modelProvider: Anthropic
+    modelProvider: ${MODEL_PROVIDER}
     credentialsSecret:
       name: llm-creds-vertex
 ---
 apiVersion: agentic.openshift.io/v1alpha1
 kind: Agent
 metadata:
-  name: opus
+  name: ${AGENT_NAME}
   namespace: $NAMESPACE
 spec:
   llmProvider:
-    name: vertex-anthropic
-  model: "claude-opus-4-6"
-  timeouts:
-    analysisSeconds: 300
-    executionSeconds: 300
-    verificationSeconds: 300
----
-apiVersion: agentic.openshift.io/v1alpha1
-kind: LLMProvider
-metadata:
-  name: vertex-google
-  namespace: $NAMESPACE
-spec:
-  type: GoogleCloudVertex
-  googleCloudVertex:
-    projectID: $VERTEX_PROJECT_ID
-    region: global
-    modelProvider: Google
-    credentialsSecret:
-      name: llm-creds-vertex
----
-apiVersion: agentic.openshift.io/v1alpha1
-kind: Agent
-metadata:
-  name: gemini
-  namespace: $NAMESPACE
-spec:
-  llmProvider:
-    name: vertex-google
-  model: "gemini-2.5-pro"
+    name: ${PROVIDER_NAME}
+  model: "${AGENT_MODEL}"
   timeouts:
     analysisSeconds: 300
     executionSeconds: 300
     verificationSeconds: 300
 EOF
-    echo "    Vertex AI providers configured (Anthropic + Gemini)."
+    echo "    Vertex AI provider configured: ${MODEL_PROVIDER} with model ${AGENT_MODEL}"
 }
 
 function run_evals() {
-    echo "==> Running agentic evaluations for agent: ${AGENT_NAME}"
+    echo "==> Running agentic evaluations for agent: ${AGENT}"
     cd "$AGENTIC_DIR"
 
-    # Override system.yaml to use only the specified agent
-    local AGENT_MODEL
-    case "$AGENT_NAME" in
-        openai) AGENT_MODEL="gpt-5.4" ;;
-        gemini) AGENT_MODEL="gemini-2.5-pro" ;;
-        opus) AGENT_MODEL="claude-opus-4-6" ;;
-    esac
-
-    # Backup original system.yaml
-    cp system.yaml system.yaml.backup
-
-    # Update system.yaml to use only the specified agent
-    python3 -c "
-import yaml
-with open('system.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-config['agents']['default']['agent'] = ['${AGENT_MODEL}']
-with open('system.yaml', 'w') as f:
-    yaml.safe_dump(config, f, default_flow_style=False)
-"
-
+    # Run setup (system.yaml used as-is)
     make setup
 
-    if [[ -n "${SUITES:-}" ]]; then
-        make evals SUITES="$SUITES"
-    else
-        make evals
+    # Run evals with AGENT variable
+    local MAKE_ARGS="AGENT=${AGENT}"
+    if [[ -n "${SCENARIOS:-}" ]]; then
+        # Convert space-separated SCENARIOS to comma-separated SCENARIO for Makefile
+        local SCENARIO_LIST="${SCENARIOS// /,}"
+        MAKE_ARGS+=" SCENARIO=${SCENARIO_LIST}"
     fi
 
-    # Restore original system.yaml
-    mv system.yaml.backup system.yaml
+    make eval $MAKE_ARGS
 }
 
 function collect_results() {
     echo "==> Collecting results to ${ARTIFACT_DIR}..."
-    mkdir -p "$ARTIFACT_DIR/agentic-${AGENT_NAME}"
-    cp -r "$AGENTIC_DIR/results/"* "$ARTIFACT_DIR/agentic-${AGENT_NAME}/" 2>/dev/null || true
+    mkdir -p "$ARTIFACT_DIR/agentic-${AGENT}"
+    cp -r "$AGENTIC_DIR/results/"* "$ARTIFACT_DIR/agentic-${AGENT}/" 2>/dev/null || true
 }
 
 function cleanup() {
     echo "==> Cleaning up..."
     cd "$AGENTIC_DIR"
-    # Restore system.yaml if backup exists (ensures clean workspace on all exit paths)
-    if [[ -f system.yaml.backup ]]; then
-        mv system.yaml.backup system.yaml
-    fi
     make cleanup || true
 }
 
 trap cleanup EXIT
 
-# Default to 'openai' if not specified
-AGENT_NAME="${AGENT_NAME:-openai}"
+# Default to gpt-5.4 if not specified
+AGENT="${AGENT:-gpt-5.4}"
 
-echo "==> Running agentic evaluations for agent: ${AGENT_NAME}"
+echo "==> Running agentic evaluations for agent: ${AGENT}"
 
 install_operator
 
 echo "==> Configuring LLM providers..."
-case "$AGENT_NAME" in
-    openai)
-        # OpenAI agent - always needs OpenAI for both agent and judge
-        setup_openai
+case "$AGENT" in
+    gpt-5.4)
+        # OpenAI agent - needs secret for both agent and judge
+        setup_openai_secret
+        setup_openai_agent "$AGENT"
         ;;
-    gemini)
-        # Google Gemini agent - needs Vertex for agent, OpenAI for judge
-        setup_openai  # For judge LLM
-        setup_vertex
+    gemini-2.5-pro)
+        # Google Gemini agent - needs Vertex for agent, OpenAI secret for judge
+        setup_openai_secret  # For judge LLM only (no Agent CR needed)
+        setup_vertex "$AGENT"
         ;;
-    opus)
-        # Anthropic Opus agent - needs Vertex for agent, OpenAI for judge
-        setup_openai  # For judge LLM
-        setup_vertex
+    claude-opus-4-6)
+        # Anthropic Opus agent - needs Vertex for agent, OpenAI secret for judge
+        setup_openai_secret  # For judge LLM only (no Agent CR needed)
+        setup_vertex "$AGENT"
         ;;
     *)
-        echo "ERROR: Unknown AGENT_NAME=${AGENT_NAME}. Valid values: openai, gemini, opus"
+        echo "ERROR: Unknown AGENT=${AGENT}. Valid values: gpt-5.4, gemini-2.5-pro, claude-opus-4-6"
         exit 1
         ;;
 esac
@@ -231,4 +208,4 @@ esac
 run_evals
 collect_results
 
-echo "==> Agentic evaluation complete for agent: ${AGENT_NAME}"
+echo "==> Agentic evaluation complete for agent: ${AGENT}"
